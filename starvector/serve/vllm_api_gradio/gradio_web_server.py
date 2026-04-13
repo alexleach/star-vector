@@ -54,7 +54,6 @@ mapping_model_task = {
 
 def get_models_dropdown_from_task(task):
     models = get_model_list()
-    models = [model for model in models if mapping_model_task[task] in model]
     dropdown_update = gr.Dropdown.update(
         choices=models,
         value=models[0] if len(models) > 0 else ""
@@ -197,6 +196,7 @@ def http_bot(state, task_selector, text_caption, model_selector, num_beams, temp
         "len_penalty": float(len_penalty),
         "top_p": float(top_p),
         "max_new_tokens": min(int(max_new_tokens), 8192-CLIP_QUERY_LENGTH),
+        "task": task_selector
     }
     logger.info(f"==== request ====\n{pload}")
 

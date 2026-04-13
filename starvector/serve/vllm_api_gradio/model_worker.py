@@ -36,7 +36,7 @@ def heart_beat_worker(controller):
 class ModelWorker:
     def __init__(self, controller_addr, worker_addr, vllm_base_url,
                  worker_id, no_register, model_name, openai_api_key):
-        
+
         self.controller_addr = controller_addr
         self.worker_addr = worker_addr
         self.worker_id = worker_id
@@ -48,12 +48,7 @@ class ModelWorker:
             api_key=openai_api_key,
             base_url=vllm_base_url,
         )
-        
-        if "text2svg" in self.model_name.lower():
-            self.task = "Text2SVG"
-        elif "im2svg" in self.model_name.lower():
-            self.task = "Image2SVG"
-            
+
         logger.info(f"Loading the model {self.model_name} on worker {worker_id} ...")
 
         self.is_multimodal = 'starvector' in self.model_name.lower()
@@ -112,16 +107,37 @@ class ModelWorker:
         }
 
     def generate_stream(self, params):
-        
+
         num_beams = int(params.get("num_beams", 1))
         temperature = float(params.get("temperature", 1.0))
         len_penalty = float(params.get("len_penalty", 1.0))
         top_p = float(params.get("top_p", 1.0))
         max_context_length = 1000
+        task = params.get("task", "Image2SVG")
 
-        # prompt = params["prompt"]
-        prompt = "<svg "
-        if self.task == "Image2SVG":
+
+        max_new_tokens = min(int(params.get("max_new_tokens", 256)), 8192)
+        max_new_tokens = min(max_new_tokens, max_context_length - CLIP_QUERY_LENGTH)
+
+        # Use the chat completions endpoint
+        vllm_endpoint = f"{self.vllm_base_url}/v1/chat/completions"
+
+        # Use a model name that vLLM recognizes
+        # The full path including the organization is important
+        model_name_for_vllm = params['model']
+
+        # Format payload for the chat completions endpoint
+        request_payload = {
+            "model": model_name_for_vllm,
+            "messages": [],
+            "max_tokens": 7500,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": True
+        }
+
+        logger.info(f"About to process {task} task")
+        if task == "Image2SVG":
             images = params.get("images", [])
             # Get the first image if available, otherwise None
             image_base_64 = images[0] if images and len(images) > 0 else None
@@ -130,90 +146,79 @@ class ModelWorker:
                 yield json.dumps({"text": "Error: No image provided for Image2SVG task", "error_code": 1}).encode() + b"\0"
                 return
 
-            max_new_tokens = min(int(params.get("max_new_tokens", 256)), 8192)
-            max_new_tokens = min(max_new_tokens, max_context_length - CLIP_QUERY_LENGTH)
-
-            # Use the chat completions endpoint
-            vllm_endpoint = f"{self.vllm_base_url}/v1/chat/completions"
-            
-            # Use a model name that vLLM recognizes
-            # The full path including the organization is important
-            model_name_for_vllm = params['model']
-            
-            # Format payload for the chat completions endpoint
-            request_payload = {
-                "model": model_name_for_vllm,
-                "messages": [
+            # Add image payload
+            request_payload["messages"].append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "<image-start>"},
                     {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "<image-start>"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base_64}"}}
-                        ]
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base_64}"}
                     }
-                ],
-                "max_tokens": 7500,
-                "temperature": temperature,
-                "top_p": top_p,
-                "stream": True
-            }
-            
-            # Log the request for debugging
-            logger.info(f"Request to vLLM: {vllm_endpoint}")
-            logger.info(f"Using model: {model_name_for_vllm}")
-            
-            # Use requests instead of OpenAI client
-            response = requests.post(
-                vllm_endpoint, 
-                json=request_payload,
-                stream=True,
-                headers={"Content-Type": "application/json"}
-            )
-            
-            # Log the response status for debugging
-            logger.info(f"Response status: {response.status_code}")
-            
-            if response.status_code != 200:
-                try:
-                    error_detail = response.json()
-                    logger.error(f"Error from vLLM server: {error_detail}")
-                except json.JSONDecodeError:
-                    logger.error(f"Error from vLLM server: {response.text}")
-                
-                yield json.dumps({"text": f"Error communicating with model server: {response.status_code}", "error_code": 1}).encode() + b"\0"
-                return
-            
-            # Process the streaming response
-            output_text = ""
-            for line in response.iter_lines():
-                if line:
-                    # Skip the "data: " prefix if present
-                    if line.startswith(b"data: "):
-                        line = line[6:]
-                    
-                    if line.strip() == b"[DONE]":
-                        break
-                    
-                    try:
-                        data = json.loads(line)
-                        if "choices" in data and len(data["choices"]) > 0:
-                            delta = data["choices"][0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                output_text += content
-                                yield json.dumps({"text": output_text, "error_code": 0}).encode() + b"\0"
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse line as JSON: {line}")
-                        continue
-            
-            # Send final output if not already sent
-            if output_text:
-                yield json.dumps({"text": output_text, "error_code": 0}).encode() + b"\0"
+                ]
+            })
+        else:
+            # Task is Text2SVG
+            prompt = params.get("prompt")
+            request_payload["messages"].append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt}
+                ]
+            })
 
-        elif self.task == "Text2SVG":
-            # Implementation for Text2SVG task would go here
-            yield json.dumps({"text": "Text2SVG task not implemented yet", "error_code": 1}).encode() + b"\0"
+        # Log the request for debugging
+        logger.info(f"Request to vLLM: {vllm_endpoint}")
+        logger.info(f"Using model: {model_name_for_vllm}")
+
+        # Use requests instead of OpenAI client
+        response = requests.post(
+            vllm_endpoint, 
+            json=request_payload,
+            stream=True,
+            headers={"Content-Type": "application/json"}
+        )
+
+        # Log the response status for debugging
+        logger.info(f"Response status: {response.status_code}")
+
+        if response.status_code != 200:
+            try:
+                error_detail = response.json()
+                logger.error(f"Error from vLLM server: {error_detail}")
+            except json.JSONDecodeError:
+                logger.error(f"Error from vLLM server: {response.text}")
+
+            yield json.dumps({"text": f"Error communicating with model server: {response.status_code}", "error_code": 1}).encode() + b"\0"
             return
+
+        # Process the streaming response
+        output_text = ""
+        for line in response.iter_lines():
+            if line:
+                # Skip the "data: " prefix if present
+                if line.startswith(b"data: "):
+                    line = line[6:]
+
+                if line.strip() == b"[DONE]":
+                    break
+
+                try:
+                    data = json.loads(line)
+                    if "choices" in data and len(data["choices"]) > 0:
+                        delta = data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            output_text += content
+                            yield json.dumps({"text": output_text, "error_code": 0}).encode() + b"\0"
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse line as JSON: {line}")
+                    continue
+
+        # Send final output if not already sent
+        if output_text:
+            yield json.dumps({"text": output_text, "error_code": 0}).encode() + b"\0"
+
 
     def generate_stream_gate(self, params):
         try:
@@ -282,7 +287,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-register", action="store_true")
     parser.add_argument("--openai-api-key", type=str, default="EMPTY")
     parser.add_argument("--vllm-base-url", type=str, default="http://localhost:8000")
-    
+
 
     args = parser.parse_args()
     logger.info(f"args: {args}")
