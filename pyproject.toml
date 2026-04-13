@@ -67,5 +67,8 @@ train = ["deepspeed", "ninja", "wandb"]
 [tool.setuptools.packages.find]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
 
+[tool.setuptools.package-data]
+starvector = ["**/*.png"]
+
 [tool.wheel]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
