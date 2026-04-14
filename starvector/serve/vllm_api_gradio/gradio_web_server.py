@@ -47,11 +47,6 @@ def load_demo(url_params, request: gr.Request):
     state = default_conversation.copy()
     return state, dropdown_update
 
-mapping_model_task = {
-    'Image2SVG': 'im2svg',
-    'Text2SVG': 'text2svg'
-}
-
 def get_models_dropdown_from_task(task):
     models = get_model_list()
     dropdown_update = gr.Dropdown.update(
