@@ -1,0 +1,178 @@
+services:
+  base-image:
+    image: starvector-base
+    build:
+      dockerfile_inline: |
+        FROM nyirocsaba/star-vector:v0.1
+
+        # We need to update the star-vector module itself,
+        # while the published version does not package assets.
+        COPY ./ /workspace/star-vector
+        USER root
+        RUN pip install /workspace/star-vector
+        USER appuser
+    deploy:
+      mode: replicated
+      replicas: 0
+
+  vllm:
+    image: nyirocsaba/star-vector:v0.1
+    build:
+      dockerfile_inline: |
+        FROM nyirocsaba/star-vector:v0.1
+
+        USER root
+        # Install and build starvector's fork of vllm.
+        # This uses a huge amount of RAM on high core-count machines, so I've
+        # reduced concurrency to not consume all of my system resources.
+        # vllm then takes all day to build.
+        RUN apt-get update \
+          && apt-get -y install \
+              git \
+              cuda-nvcc-12-4 \
+          && git clone https://github.com/starvector/vllm.git \
+          && cd vllm \
+          && MAX_JOBS=8 NVCC_THREADS=2 pip install -e .
+
+        RUN useradd -m -u 1000 appuser
+        USER appuser
+        RUN mkdir -p ~appuser/.cache/huggingface
+        VOLUME ~appuser/.cache/huggingface
+
+    healthcheck:
+      test: "curl -f http://127.0.0.1:8000/health || exit 1"
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    runtime: nvidia
+    volumes:
+      - hf-models:/home/appuser/.cache/huggingface
+
+    ports:
+      - :8000
+
+    environment:
+      HUGGING_FACE_HUB_TOKEN: <HF_TOKEN>
+
+    entrypoint:
+      - vllm
+      - serve
+
+    command:
+      - starvector/starvector-1b-im2svg
+      - --chat-template
+      - /workspace/star-vector/configs/chat-template.jinja
+      - --trust-remote-code
+      - --port
+      - "8000"
+      - --max-model-len
+      - "8192"
+
+
+  controller:
+    image: starvector-base
+    ports:
+      - :10000
+
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+    entrypoint:
+      - python
+      - -m
+      - starvector.serve.vllm_api_gradio.controller
+
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "10000"
+
+    healthcheck:
+      test: "wget --no-verbose --tries=1 --post-data '' http://localhost:10000/worker_get_status || exit 1"
+      interval: 4s
+      timeout: 5s
+      retries: 3
+
+
+  gradio:
+    image: starvector-base
+
+    ports:
+      - :7000
+
+    entrypoint:
+      - python
+      - -m
+      - starvector.serve.vllm_api_gradio.gradio_web_server
+
+    depends_on:
+      controller:
+        condition: service_healthy
+
+    command:
+      - --controller
+      - http://controller:10000
+      - --model-list-mode
+      - reload
+      - --port
+      - "7000"
+
+    networks:
+      - default
+      - traefik_net
+
+    labels:
+      # Let's traefik route incoming requests to the gradio web server
+      traefik.enable: true
+      traefik.docker.network: traefik_net
+
+      # Gradio Web Server
+      traefik.http.routers.starvector.entryPoints: websecure
+      traefik.http.routers.starvector.rule: Host(`starvector.lan`)
+      traefik.http.routers.starvector.service: starvector
+      traefik.http.services.starvector.loadbalancer.server.port: 7000
+
+  model-worker:
+    image: starvector-base
+    ports:
+      - :40000
+
+    depends_on:
+      controller:
+        condition: service_started
+
+    entrypoint:
+      - python
+      - -m
+      - starvector.serve.vllm_api_gradio.model_worker
+
+    command:
+      - --host
+      - 0.0.0.0
+      - --controller
+      - http://controller:10000
+      - --port
+      - "40000"
+      - --worker
+      - http://model-worker:40000
+      - --model-name
+      - starvector/starvector-1b-im2svg
+      - --vllm-base-url
+      - http://vllm:8000
+
+    network:
+      - backend
+
+
+networks:
+  traefik_net:
+    external: true
+
+
+volumes:
+  hf-models:
+    external: true
