@@ -1,0 +1,123 @@
+services:
+  base-image:
+    image: starvector-base
+    build:
+      dockerfile_inline: |
+        FROM nyirocsaba/star-vector:v0.1
+
+        # Package and rebuild the star-vector module from this checkout.
+        COPY ./ /workspace/star-vector
+        USER root
+        RUN pip install /workspace/star-vector
+
+        USER appuser
+        WORKDIR /home/appuser
+
+    # Don't run this service, just use it as a base image.
+    deploy:
+      mode: replicated
+      replicas: 0
+
+  controller:
+    image: starvector-base
+    ports:
+      - :10000
+    entrypoint:
+      - python
+      - -m
+      - starvector.serve.controller
+
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "10000"
+
+    healthcheck:
+      test: "wget --no-verbose --tries=1 --post-data '' http://localhost:10000/worker_get_status || exit 1"
+      interval: 4s
+      timeout: 5s
+      retries: 3
+
+
+  gradio:
+    image: starvector-base
+
+    ports:
+      - :7000
+
+    entrypoint:
+      - python
+      - -m
+      - starvector.serve.gradio_web_server
+
+    command:
+      - --controller
+      - http://controller:10000
+      - --model-list-mode
+      - reload
+      - --port
+      - "7000"
+
+    depends_on:
+      controller:
+        condition: service_healthy
+
+    networks:
+      - default
+      - traefik_routed
+
+    labels:
+      # Let's traefik route incoming requests to the gradio web server
+      traefik.enable: true
+      traefik.docker.network: traefik_routed
+
+      # Gradio Web Server
+      traefik.http.routers.starvector.entryPoints: websecure
+      traefik.http.routers.starvector.rule: Host(`starvector.lan`)
+      traefik.http.routers.starvector.service: starvector
+      traefik.http.services.starvector.loadbalancer.server.port: 7000
+
+  model-worker:
+    image: starvector-base
+    ports:
+      - :40000
+
+    depends_on:
+      controller:
+        condition: service_healthy
+
+    environment:
+      HUGGING_FACE_HUB_TOKEN: <HF_TOKEN>
+
+    entrypoint:
+      - python
+      - -m
+      - starvector.serve.model_worker
+
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "40000"
+      - --controller
+      - http://controller:10000
+      - --worker
+      - http://model-worker:40000
+      - --model-path
+      - starvector/starvector-1b-im2svg
+
+    networks:
+      - default
+
+    volumes:
+      - hf-models:/home/appuser/.cache/huggingface
+
+networks:
+  traefik_routed:
+    external: true
+
+
+volumes:
+  hf-models:
+    external: true
